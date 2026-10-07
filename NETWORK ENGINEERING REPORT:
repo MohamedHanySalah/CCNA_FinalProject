@@ -1,0 +1,439 @@
+NETWORK ENGINEERING REPORT: CCNA COMPANY PROJECT
+
+- What it is: a three-floor corporate campus network for six departments.
+- Scale: 40 clients (19 PCs, 11 laptops, 6 smartphones, 4 printers), 2 servers, 6 access points.
+- Internet: two core routers connected to two ISP routers in a full mesh.
+- Resilience goal: no single failure in switching, routing or internet access stops the service.
+- Two accepted exceptions: DHCP and the servers are single instances; NAT works only on the primary ISP path.
+
+Key design decisions and why:
+1. Hierarchical design with a collapsed core. Only six access switches exist, so a separate core layer would add devices with no benefit.
+2. One VLAN and one subnet per department. Isolates broadcasts, allows per-department policy, simplifies moves.
+3. Inter-VLAN routing on multilayer switches (SVIs). Hardware routing, and no single trunk cable acting as a bottleneck (the weakness of Router-on-a-Stick).
+4. HSRP per VLAN, with the STP root on the same switch. Layer 2 and Layer 3 paths coincide, so there is no extra hop over the inter-switch link.
+5. Routed /30 links between multilayer switches and core routers. No STP dependency at the edge, faster failover, smaller broadcast domains.
+6. OSPF, single area. Open standard, fast convergence, enough for this size.
+7. Two edge routers and two ISPs in full mesh. Any one router or ISP can fail.
+8. VLSM addressing: /25 for departments, /28 for the server room, /30 for links. No wasted addresses.
+9. Layered security: encrypted secrets, SSH only, port security, unused ports shut, WPA2.
+
+Numbers: 3 floors, 6 departments, 6 access switches (2960-24TT), 2 multilayer switches (3650-24PS), 2 core routers (2911), 2 ISP routers (2811), 6 access points, 2 servers, 14 subnets (6 departments, 4 internal links, 4 ISP links).
+
+2. OBJECTIVES, SCOPE, ASSUMPTIONS
+
+Objectives:
+1. Full connectivity between departments, with broadcast isolation.
+2. Internet access for everyone through NAT overload.
+3. Survive the loss of one multilayer switch, one core router, one ISP or one uplink.
+4. Company services: website, DNS, email, FTP (cloud storage).
+5. One access point and one SSID per department.
+6. DHCP for clients; static addresses for servers and printers.
+7. Basic security on every device and port.
+8. Easy maintenance: consistent naming, fixed addressing pattern, documentation.
+
+Assumptions:
+- Packet Tracer 9.0.1 simplifies or lacks some real features.
+- 195.136.17.0/28 is lab space for the ISP links.
+- Passwords follow a lab pattern (name + 123.0) and must change in production.
+- DHCP runs on Multi-SW1 only.
+
+Out of scope: BGP, IPv6, VoIP, firewalls, ACLs between departments.
+
+3. DESIGN PRINCIPLES
+
+3.1 Hierarchy
+- Access: connects users, VLANs, port security. Needs many cheap ports.
+- Aggregation/core: fast routing and redundancy.
+- Edge: external connectivity and NAT.
+- Benefits: a failure stays inside its layer; adding a department needs one switch and one VLAN; the layer tells you where to troubleshoot.
+
+3.2 Why a collapsed core
+- Merging distribution and core gives one pair of devices instead of two: fewer cables and configs.
+- Split it when access switches exceed about 10 to 12, a second building is added, or ACLs and QoS need separating from fast forwarding.
+
+3.3 No single point of failure
+- Access to aggregation: each access switch has an uplink to both multilayer switches.
+- Default gateway: HSRP per VLAN.
+- Aggregation to edge: four routed links, every switch to every router.
+- Edge to internet: four serial links plus a floating static route.
+- Not redundant (accepted): the access switch of each department, DHCP, the servers.
+
+3.4 Simplicity: one routing protocol, one area, PVST+ instead of MST, one addressing pattern.
+3.5 Defense in depth: management, port, network and wireless controls, so one failure leaves the others.
+3.6 Consistency: same address pattern in every subnet, VLAN ID equals HSRP group, one naming and password rule.
+
+4. ARCHITECTURE AND DEVICE SELECTION
+
+4.1 Devices
+- Access: Sales-SW, HR-SW, FIN-SW, ICT-SW, Admin-SW, Server-SW (2960-24TT). Many cheap ports, no Layer 3 needed.
+- Aggregation and core: Multi-SW1, Multi-SW2 (3650-24PS). Supports ip routing, SVIs, Gigabit.
+- Edge: CORE-1, CORE-2 (2911). Gigabit ports and a HWIC slot for serial ports.
+- Provider: ISP-1, ISP-2 (2811). Simulation only (loopbacks 8.8.8.8 and 9.9.9.9).
+
+4.2 Why a multilayer switch, not Router-on-a-Stick
+- Router-on-a-Stick sends all inter-VLAN traffic in and out of one router over one trunk: bottleneck and single point of failure.
+- A multilayer switch routes between SVIs internally in hardware, needs no extra cable, and two switches give redundancy through HSRP.
+
+4.3 Why separate edge routers
+- If one pair did both internal routing and edge, an internet fault could break internal routing.
+- With separation, losing a core router does not touch internal routing, and losing a multilayer switch does not cut the internet (both routers connect to both switches).
+
+4.4 Uplink oversubscription
+1. Access uplinks are FastEthernet (100 Mbps); STP leaves one forwarding.
+2. The busiest switch is FIN-SW: 7 wired devices plus an access point.
+3. Worst case: 8 x 100 Mbps = 800 Mbps offered to 100 Mbps, ratio 8 to 1.
+4. Acceptable because office traffic is bursty.
+5. If congestion appears: Gigabit uplinks or EtherChannel.
+
+4.5 Cabling summary
+- Every access switch: Fa0/1 to Multi-SW1, Fa0/2 to Multi-SW2.
+- Sales-SW Fa0/1 to Multi-SW1 Gi1/0/3, Fa0/2 to Multi-SW2 Gi1/0/9. HR-SW: Gi1/0/4 and Gi1/0/7. FIN-SW: Gi1/0/5 and Gi1/0/6. ICT-SW: Gi1/0/6 and Gi1/0/5. Admin-SW: Gi1/0/7 and Gi1/0/4. Server-SW: Gi1/0/8 and Gi1/0/3.
+- Inter-switch link: Multi-SW1 Gi1/0/10 to Multi-SW2 Gi1/0/8.
+
+5. LAYER 2 DESIGN
+
+5.1 VLANs
+Why one VLAN per department:
+- Broadcast isolation: ARP and DHCP stay inside the department.
+- Security: departments talk only through a routing point where ACLs can be added.
+- Management: moving an employee means changing a port VLAN, not recabling.
+- Performance: each /25 holds at most 126 hosts.
+
+Numbering: 10 to 60 in steps of 10 to leave room for new VLANs. VLAN 1 is not used for users (default and a common attack target).
+- VLAN 10 Sales (Sales and Marketing) 172.16.1.0/25
+- VLAN 20 HR (HR and Logistics) 172.16.1.128/25
+- VLAN 30 Finance (Finance and Accounts) 172.16.2.0/25
+- VLAN 40 ICT 172.16.3.0/25
+- VLAN 50 Admin (Admin and Public Relations) 172.16.2.128/25
+- VLAN 60 Server (Server Room) 172.16.3.128/28
+
+VLAN database: each access switch defines only its own VLAN, so it neither forwards nor runs STP for VLANs it does not need. Both multilayer switches define all six.
+Management: each access switch has a management SVI in its own VLAN (for example 172.16.1.2 on Sales-SW). A dedicated management VLAN is better practice and is listed in the recommendations.
+
+5.2 Trunks
+- 802.1Q: open standard; ISL is obsolete.
+- Static trunk mode (switchport mode trunk): dynamic mode uses DTP, which lets an unknown device negotiate a trunk (basis of VLAN hopping).
+- Native VLAN 1 and all VLANs allowed: defaults kept for simplicity; hardening is in the recommendations.
+- Where: Fa0/1 and Fa0/2 on access switches; Gi1/0/3 to Gi1/0/10 on the multilayer switches.
+
+5.3 Spanning Tree
+- Why STP: dual uplinks create loops; without STP broadcasts circulate forever (no TTL in Ethernet) and the network collapses.
+- Why PVST+: Cisco default, one instance per VLAN; MST is unnecessary for six VLANs.
+- Root election: lowest priority wins (default 32768). Left to chance, an old access switch could become root.
+- Multi-SW1: priority 24576 (root primary). Multi-SW2: 28672 (root secondary). Access switches: default. Values are multiples of 4096 because the VLAN ID takes 12 bits.
+
+Why Multi-SW1 is the root:
+1. It is also the HSRP Active gateway for all VLANs.
+2. If the root were Multi-SW2, frames would go access switch, Multi-SW2, inter-switch link, Multi-SW1.
+3. With both roles on one switch the path is direct.
+4. This saves a hop and keeps load off the inter-switch link.
+
+Which ports are blocked:
+1. On each access switch Fa0/1 is the root port (cost 19 straight to the root).
+2. Fa0/2 reaches the root via Multi-SW2 (19 + 4), so it is the alternate port in Blocking.
+3. If Multi-SW1 or Fa0/1 fails, Fa0/2 moves to Forwarding.
+
+Convergence: about 30 seconds in PVST+ (up to about 50 s for indirect failures). Rapid-PVST (1 to 2 s) is recommended for production.
+Accepted trade-offs: half of the uplinks idle (no per-VLAN load balancing, kept for simplicity); one inter-switch cable (an LACP EtherChannel would be better).
+
+5.4 Port security
+Threats: an unauthorised device on a wall port; MAC flooding (CAM overflow).
+Settings on every used endpoint port:
+- switchport mode access: one end device, no trunk negotiation.
+- mac-address sticky: learns the MAC and saves it in the config.
+- maximum 1: one device per port.
+- maximum 5 on access-point ports: up to 4 wireless clients (Sales, FIN) plus the access point.
+- violation shutdown (default): strongest response (err-disabled).
+Modes compared: protect drops silently; restrict drops and logs; shutdown disables the port and logs.
+Operating steps:
+1. After the build, ping from every device so sticky MACs are learned.
+2. Run write memory to save them.
+3. To recover a port: fix the cause, then shutdown and no shutdown.
+4. When replacing a device: clear port-security sticky interface <port>.
+Unused ports are shut down on every access switch. Port security is not applied on trunks and routed ports.
+
+6. LAYER 3 DESIGN
+
+6.1 Inter-VLAN routing
+1. Each VLAN has an SVI on both multilayer switches.
+2. ip routing makes each SVI network a connected route.
+3. A packet between departments is routed inside the active multilayer switch and never reaches the core routers.
+4. Why: shortest path; internal traffic is independent of the internet edge.
+
+6.2 HSRP
+Why: a PC has one gateway address; if that were a real device and it failed, the PC would lose off-subnet access. HSRP gives both switches one virtual IP and MAC.
+Design:
+- One group per VLAN, group number equals VLAN ID.
+- Multi-SW1: priority 110 with preempt (Active). Multi-SW2: priority 100 (Standby).
+- Preempt returns the Active role to Multi-SW1 after it recovers, so traffic goes back to the optimal path.
+- Hello 3 s, hold 10 s: failover in about 10 seconds.
+Addresses (virtual IP, Multi-SW1 SVI, Multi-SW2 SVI):
+- VLAN 10: 172.16.1.1, .3, .4
+- VLAN 20: 172.16.1.129, .131, .132
+- VLAN 30: 172.16.2.1, .3, .4
+- VLAN 40: 172.16.3.1, .3, .4
+- VLAN 50: 172.16.2.129, .131, .132
+- VLAN 60: 172.16.3.129, .131, .132
+When Multi-SW1 fails:
+1. Multi-SW2 stops hearing hellos.
+2. After about 10 s it becomes Active for all six groups.
+3. Clients keep the same gateway IP.
+4. On recovery, preempt returns the Active role to Multi-SW1.
+
+6.3 Routed links (multilayer switches to core routers)
+Why routed ports, not trunks: no STP dependency, no blocked links, faster failover; each link is its own small broadcast domain; a /30 wastes no addresses.
+- Multi-SW1 Gi1/0/1 to CORE-1 Gi0/0: 172.16.3.144/30 (.145 / .146)
+- Multi-SW2 Gi1/0/1 to CORE-1 Gi0/1: 172.16.3.148/30 (.149 / .150)
+- Multi-SW1 Gi1/0/2 to CORE-2 Gi0/0: 172.16.3.152/30 (.153 / .154)
+- Multi-SW2 Gi1/0/2 to CORE-2 Gi0/1: 172.16.3.156/30 (.157 / .158)
+
+6.4 OSPF
+Why OSPF: open standard (EIGRP is Cisco-only); link-state, fast and loop-free (RIP is slow, 15 hops max); static routes cannot react to failures. Single area: only four routing devices.
+Configuration and reasons:
+1. network 172.16.0.0 0.0.255.255 area 0 on Multi-SW1, Multi-SW2, CORE-1, CORE-2: one statement covers all internal subnets and links.
+2. Router IDs: CORE-1 1.1.1.1, CORE-2 2.2.2.2, Multi-SW1 3.3.3.3, Multi-SW2 4.4.4.4: stable identity.
+3. passive-interface default on the multilayer switches, with Gi1/0/1 and Gi1/0/2 active: no hellos into user VLANs, nobody can form an adjacency from a user port.
+4. default-information originate on both core routers: they advertise the internet default route.
+Expected: two FULL neighbours on each multilayer switch; two equal-cost default routes (ECMP). On Ethernet, OSPF elects a DR and BDR (point-to-point network type would remove that; a refinement).
+
+6.5 Default routes and WAN failover
+- CORE-1: primary 0.0.0.0/0 via 195.136.17.2 (ISP-1); backup via 195.136.17.6 (ISP-2), distance 10.
+- CORE-2: primary via 195.136.17.10 (ISP-1); backup via 195.136.17.14 (ISP-2), distance 10.
+- Why static: no real ISP to run BGP with; an edge router only needs a default.
+- How failover works: the backup has distance 10 so it stays hidden; if the primary serial link goes down the primary route is removed and the backup enters the table.
+- Limitation: NAT is bound to the ISP-1 link, so the backup path does not translate.
+
+6.6 NAT overload
+1. ACL 1 permits 172.16.0.0 0.0.255.255.
+2. Gi0/0 and Gi0/1 are ip nat inside; Se0/0/0 and Se0/0/1 are ip nat outside (both core routers).
+3. CORE-1: ip nat inside source list 1 interface Serial0/0/0 overload.
+4. CORE-2: ip nat inside source list 1 interface Serial0/0/1 overload.
+- Why NAT: 172.16.0.0/16 is private and not routable on the internet.
+- Why overload: many hosts share one outside address using port numbers.
+- Limitation: on the backup path packets leave untranslated and the ISP drops the replies.
+- Improvement: one NAT statement per ISP using route-maps, or IP SLA tracking.
+
+6.7 ISP simulation
+- ISP-1 and ISP-2 have only connected networks and a loopback each (8.8.8.8 and 9.9.9.9).
+- They need no inside routes because NAT hides the inside addresses.
+- The DCE side of each serial link carries clock rate 2000000.
+
+7. IP ADDRESSING AND SUBNETTING
+
+7.1 Why 172.16.0.0
+- 172.16.0.0/12 is private (RFC 1918), larger than 192.168.0.0/16 and less likely to clash with home networks or VPNs.
+- Only 172.16.1.0 to 172.16.3.255 is used, so there is plenty of room to grow.
+
+7.2 Subnetting steps
+1. Count devices per department (clients, access point, printers, infrastructure addresses).
+2. Pick the smallest prefix that fits with growth room (usable hosts = 2^n - 2).
+3. Allocate from one base block in increasing order.
+4. Reserve fixed addresses at the start of each subnet.
+Devices today: Sales 13, HR 12, Finance 15, ICT 11, Admin 10, Server Room 11.
+- /25 gives 2^7 - 2 = 126 hosts (all five departments).
+- Server Room: 11 needed; /29 gives 6 (too small); /28 gives 14.
+- /30 gives 2 (point-to-point links).
+- Bonus: all internal addresses are inside 172.16.0.0/22, so one summary route covers the campus.
+
+7.3 Department subnets (network, mask, usable range, broadcast)
+- Sales 172.16.1.0/25, 255.255.255.128, .1 to .126, 172.16.1.127
+- HR 172.16.1.128/25, 255.255.255.128, .129 to .254, 172.16.1.255
+- Finance 172.16.2.0/25, 255.255.255.128, .1 to .126, 172.16.2.127
+- Admin 172.16.2.128/25, 255.255.255.128, .129 to .254, 172.16.2.255
+- ICT 172.16.3.0/25, 255.255.255.128, .1 to .126, 172.16.3.127
+- Server Room 172.16.3.128/28, 255.255.255.240, .129 to .142, 172.16.3.143
+
+7.4 Pattern inside every subnet
+- First address: HSRP virtual IP. Second: access switch SVI. Third and fourth: Multi-SW1 and Multi-SW2.
+- Then static devices, then the DHCP range.
+- Why: anyone can predict any department's gateway and switch addresses.
+- Why exclusions: DHCP must never give out an address used by infrastructure or a static device.
+- Sales: DHCP excludes .1-.9, leases .10-.126.
+- HR: Printer1 172.16.1.136, Printer2 172.16.1.137; excludes .129-.138, leases .139-.254.
+- Finance: Printer0 172.16.2.5; excludes .1-.9, leases .10-.126.
+- ICT: excludes .1-.9, leases .10-.126.
+- Admin: Printer3 172.16.2.135; excludes .129-.138, leases .139-.254.
+- Server Room: Server0 172.16.3.133, Server1 172.16.3.134; excludes .129-.134, leases .135-.142.
+
+7.5 ISP links
+- CORE-1 Se0/0/0 (.1, DCE) to ISP-1 Se0/2/0 (.2): 195.136.17.0/30
+- CORE-1 Se0/0/1 (.5) to ISP-2 Se0/2/0 (.6, DCE): 195.136.17.4/30
+- CORE-2 Se0/0/1 (.9) to ISP-1 Se0/2/1 (.10, DCE): 195.136.17.8/30
+- CORE-2 Se0/0/0 (.13) to ISP-2 Se0/2/1 (.14, DCE): 195.136.17.12/30
+
+8. SERVICES
+
+8.1 DHCP (on Multi-SW1)
+How a client gets an address:
+1. The PC broadcasts a DHCP Discover on its VLAN.
+2. The Multi-SW1 SVI in that VLAN receives it and picks the pool matching the SVI subnet.
+3. The switch offers an address, skipping excluded ranges.
+4. The PC requests it and the switch confirms.
+5. The client also gets the gateway (HSRP virtual IP) and DNS 172.16.3.133.
+- Why centralised: one place to manage; no helper address needed.
+- Risk: if Multi-SW1 fails, new clients get no address; existing leases keep working until they expire.
+- Fix: split ranges on Multi-SW2 or use a redundant DHCP server.
+Pools: Sales, HR, FIN, ICT, Admin, Server, one per subnet.
+
+8.2 Server room
+- Servers sit in their own VLAN 60 so all access to them crosses a routing point where ACLs can apply.
+- Static IPs keep DNS records, mail settings and the DHCP DNS option stable.
+
+8.3 Server0: website and DNS (172.16.3.133)
+- HTTP and HTTPS On, with the company page.
+- DNS On: www.project.local = 172.16.3.133; mail.project.local = 172.16.3.134; cloud.project.local = 172.16.3.134.
+- Why DNS: users type names; moving a service later only needs a record change.
+
+8.4 Server1: email and cloud storage (172.16.3.134)
+How a message travels:
+1. The sender's client submits it to the server over SMTP.
+2. The server stores it in the recipient mailbox.
+3. The recipient's client collects it over POP3 when pressing Receive.
+Mailboxes: sales, hr, fin, ict, admin at project.local, each with password name + 123.0.
+Cloud storage: FTP user cloud (password cloud123.0, permissions read, write, delete, rename, list). The default cisco account should be removed in production.
+
+8.5 Mail client settings (all PCs, laptops, smartphones of the five departments)
+1. Desktop, then Email.
+2. Your Name: the department name.
+3. Email Address: user@project.local.
+4. Incoming and outgoing server: 172.16.3.134.
+5. User name: short user (for example sales); password: user password.
+6. Server Room devices (PC18, PC19, Laptop9, Laptop10) have no mailbox.
+
+8.6 Printers (static, inside the excluded ranges)
+- Printer0 (FIN-SW Fa0/5): 172.16.2.5/25, gateway 172.16.2.1
+- Printer1 (HR-SW Fa0/5): 172.16.1.136/25, gateway 172.16.1.129
+- Printer2 (HR-SW Fa0/6): 172.16.1.137/25, gateway 172.16.1.129
+- Printer3 (Admin-SW Fa0/5): 172.16.2.135/25, gateway 172.16.2.129
+- Why static: every client reaches the printer at a fixed address and DHCP never reassigns it.
+
+9. WIRELESS DESIGN
+
+Principles:
+1. One access point per department, plugged into an access port of that department's VLAN.
+2. All clients of that SSID land in the right VLAN with no tagging on the access point.
+3. Each department has its own SSID, so a device associates only with its own department.
+4. Channels 1, 6, 11 are the only non-overlapping 2.4 GHz channels (22 MHz wide, 5 MHz spacing); a channel is reused only on a different floor.
+5. WPA2-PSK with AES: WEP and TKIP are broken or deprecated. Limit: one shared passphrase per department; WPA2-Enterprise with RADIUS would give per-user credentials.
+Access points:
+- Sales: Sales-SW Fa0/7, Sales-WiFi, channel 1, clients Laptop0-2 and Smartphone0
+- HR: HR-SW Fa0/7, HR-WiFi, channel 6, clients Laptop3-5
+- FIN: FIN-SW Fa0/9, FIN-WiFi, channel 11, clients Laptop6-7 and Smartphone1-2
+- ICT: ICT-SW Fa0/7, ICT-WiFi, channel 1, clients Smartphone3-4
+- Admin: Admin-SW Fa0/6, Admin-WiFi, channel 6, clients Laptop8 and Smartphone5
+- Server: Server-SW Fa0/7, Server-WiFi, channel 11, clients Laptop9-10
+Passphrase: department name + 123.0.
+Client setup:
+1. Laptops: power off, replace the copper module with WPC300N, power on.
+2. Config, then Wireless0, enter the SSID.
+3. Select WPA2-PSK with AES and the passphrase.
+4. Set DHCP in Desktop, IP Configuration.
+5. Smartphones use the built-in adapter; repeat steps 2 to 4.
+
+10. SECURITY HARDENING
+
+Baseline on every switch and router:
+1. hostname: identifies the device.
+2. no ip domain-lookup: stops the CLI freezing on a mistyped command (usability).
+3. service password-encryption: hides line passwords from onlookers (type 7, reversible, weak).
+4. enable secret: salted hash (type 5); enable password is clear text, so it is not used.
+5. Console password and login: protects the physical port.
+6. Banner: legal warning (text: only authorized access!!).
+7. ip domain-name project.local and crypto key generate rsa general-keys modulus 1024: SSH needs both.
+8. ip ssh version 2: avoids SSH v1 weaknesses.
+9. username <name> secret <password>: local account with a hashed password.
+10. line vty with login local and transport input ssh: SSH only, Telnet refused.
+- Multilayer switches use line vty 0 15.
+- On the ISP routers the delivered file shows service password-encryption disabled; enable it.
+Where applied: secrets, SSH, banner on all 12 network devices; sticky port security and shut unused ports on the six access switches; static trunks everywhere; OSPF passive interfaces on the multilayer switches; WPA2 on the access points and wireless clients.
+
+11. RESILIENCE ANALYSIS
+
+1. Multi-SW1 fails: Multi-SW2 becomes HSRP Active after about 10 s; access switches unblock Fa0/2 after about 30 to 50 s; Multi-SW2 becomes STP root; new DHCP leases fail. Short interruption.
+2. Multi-SW2 fails: the Active path is unaffected; only redundancy is lost.
+3. CORE-1 fails: each multilayer switch loses one OSPF neighbour and keeps the default route through CORE-2, which reaches ISP-1 with NAT. Immediate on link-down, up to 40 s (OSPF dead timer) otherwise.
+4. CORE-2 fails: the same, through CORE-1.
+5. ISP-1 fails: the cores switch to the floating route via ISP-2, but NAT is bound to ISP-1, so internet traffic is not translated and fails. Internal traffic is unaffected. Fix: route-map NAT.
+6. One access uplink fails: STP unblocks the other uplink in about 30 s.
+7. Access switch fails: that department is isolated; the rest is unaffected.
+8. Server fails: its services are unavailable (single instance).
+9. Inter-switch link fails: the two multilayer switches lose their direct path; a second link in an EtherChannel is recommended.
+
+12. TRAFFIC FLOWS
+
+A. Sales PC to HR PC
+1. The PC ARPs for its gateway 172.16.1.1 (HSRP virtual MAC) and sends the frame.
+2. Sales-SW forwards it on the Fa0/1 trunk, tagged VLAN 10, to Multi-SW1.
+3. Multi-SW1 (HSRP Active) routes it from VLAN 10 to VLAN 20 internally.
+4. It sends the frame out the trunk toward HR-SW, tagged VLAN 20.
+5. HR-SW delivers it to the PC port. The reply follows the same path back.
+B. PC to internet (8.8.8.8)
+1. The PC sends to its gateway; Multi-SW1 looks up the default route (OSPF).
+2. It forwards to CORE-1 or CORE-2 (equal cost).
+3. The core router translates the source address (NAT overload) and sends it over the serial link to ISP-1.
+4. ISP-1 answers from loopback 8.8.8.8; the core router translates the reply back.
+C. Web by name
+1. The client asks DNS (172.16.3.133) for www.project.local and gets 172.16.3.133.
+2. It opens HTTP to that address across VLANs through Multi-SW1.
+D. Email
+1. The client sends SMTP to 172.16.3.134.
+2. The server stores the message; the recipient presses Receive and collects it over POP3.
+
+13. VERIFICATION AND OPEN ITEMS
+
+Tests to run and record (no results are recorded in this report):
+1. All links green after about 1 minute.
+2. show vlan brief: VLANs present, ports in the right VLAN.
+3. show interfaces trunk: trunks on uplinks and Gi1/0/3 to Gi1/0/10.
+4. show spanning-tree vlan 10 on Multi-SW1: this bridge is the root.
+5. show standby brief: six groups, Multi-SW1 Active, Multi-SW2 Standby.
+6. ipconfig on every client: address in the right range, correct gateway and DNS.
+7. Ping inside a department, between departments (the first packet may fail because of ARP), to each virtual IP.
+8. show ip ospf neighbor: two FULL neighbours per multilayer switch; show ip route.
+9. Ping 8.8.8.8 from each department; show ip nat translations on CORE-1.
+10. Failover: power off CORE-1, then Multi-SW1, and confirm traffic continues.
+11. Website, DNS, email (Sales to HR), FTP login as cloud.
+12. Each wireless device is associated with its own SSID and gets a DHCP address.
+13. Printers answer ping from another department.
+14. Port security: an unknown device on a used port gives err-disabled.
+15. SSH login works; Telnet is refused.
+16. show running-config has secrets as type 5; startup-config equals running-config.
+Open items:
+- RSA keys must be generated on each device for SSH.
+- WPA2 passphrases must be set on the access points and clients.
+- Enable service password-encryption on the ISP routers.
+- Server Room staff have no mailbox.
+
+14. ISSUES FOUND AND RESOLVED
+
+1. Admin-SW ports were in VLAN 60 instead of 50, with an extra Vlan60 SVI: moved to VLAN 50 and removed the SVI.
+2. NAT was missing on both core routers: added ACL 1, inside/outside, overload.
+3. Three of the four serial links had mismatched addresses (wiring did not match the plan): swapped addresses on CORE-1 and ISP-1.
+4. The ISPs had no loopbacks, so internet tests were impossible: added 8.8.8.8 and 9.9.9.9.
+5. Sales-SW second uplink was on Multi-SW1 Gi1/0/9 instead of Multi-SW2: moved, restoring redundancy.
+6. Commands were pasted in the wrong CLI mode (DHCP pools in privileged EXEC, IPs before no switchport, OSPF before ip routing): redone in the right mode.
+7. enable password and username password on Multi-SW1, extra password on Sales-SW: replaced by secret.
+8. Trunk was missing on Multi-SW1 Gi1/0/9-10.
+9. Laptops had wired cards: replaced with WPC300N.
+10. Startup config differed from running config: saved with write memory.
+11. Printer3 had no address and email clients were unconfigured: fixed.
+12. First ping loss between departments is normal ARP behaviour, not a fault.
+
+15. RECOMMENDATIONS
+
+1. ACLs: allow departments to reach only the servers (HTTP, HTTPS, DNS, SMTP, POP3, FTP); block Sales to Admin.
+2. DHCP redundancy: split ranges on Multi-SW2 or use a redundant server.
+3. NAT per ISP using route-maps or IP SLA tracking.
+4. Rapid-PVST, PortFast and BPDU Guard on access ports.
+5. EtherChannel (LACP) between the multilayer switches.
+6. Per-VLAN load balancing: root and HSRP Active alternate between the two switches.
+7. Management VLAN, native VLAN changed to an unused one, allowed VLANs pruned.
+8. DHCP snooping and dynamic ARP inspection.
+9. HSRP authentication and interface tracking.
+10. OSPF point-to-point network type on the /30 links; summary route 172.16.0.0/22.
+11. WPA2-Enterprise with RADIUS and more access points per department.
+12. Centralised logging and time sync (syslog, NTP); remove the default cisco account on the servers.
+
+16. CONCLUSION
+
+The network meets its objectives: department isolation, full internal connectivity, redundant gateways and routing, internet access with failover, company services and wireless access. Its two known weaknesses (single DHCP and server instances, NAT only on the primary ISP) are documented with fixes in section 15. Security is basic but consistent across all devices.
